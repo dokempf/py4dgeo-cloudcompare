@@ -34,6 +34,7 @@ def m3c2_module(monkeypatch):
     pycc.PointCoordinateType = np.float32
     pycc.ScalarType = np.float32
     pycc.GetInstance = lambda: None
+    pycc.ProcessEvents = lambda: None
     monkeypatch.setitem(sys.modules, "pycc", pycc)
     sys.modules.pop("py4dgeo_cloudcompare.m3c2", None)
     return importlib.import_module("py4dgeo_cloudcompare.m3c2")
@@ -340,9 +341,9 @@ def test_plugin_pumps_cloudcompare_events_without_pyside(
         m3c2_module, "_start_configuration_process", lambda request: process
     )
     monkeypatch.setattr(
-        m3c2_module,
-        "_cloudcompare_event_processor",
-        lambda: lambda flags: event_threads.append(threading.get_ident()),
+        m3c2_module.pycc,
+        "ProcessEvents",
+        lambda: event_threads.append(threading.get_ident()),
     )
     monkeypatch.setattr(m3c2_module.time, "sleep", lambda seconds: None)
 
@@ -483,11 +484,9 @@ def test_tkinter_plugin_runs_dialog_and_compute_in_process(
     monkeypatch.setattr(module, "_loaded_point_clouds", lambda app: [])
     monkeypatch.setattr(module, "_dialog_request", lambda app, clouds: request)
     monkeypatch.setattr(
-        module,
-        "_cloudcompare_event_processor",
-        lambda: lambda flags: observed_threads.append(
-            ("qt", threading.get_ident())
-        ),
+        module.pycc,
+        "ProcessEvents",
+        lambda: observed_threads.append(("qt", threading.get_ident())),
     )
     monkeypatch.setattr(module, "_clear_cloudcompare_wait_cursor", lambda: None)
     monkeypatch.setattr(module.time, "sleep", lambda seconds: None)

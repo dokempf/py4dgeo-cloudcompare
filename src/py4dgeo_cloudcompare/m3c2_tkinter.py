@@ -15,7 +15,6 @@ import pycc
 from .m3c2 import (
     M3C2Plugin,
     _clear_cloudcompare_wait_cursor,
-    _cloudcompare_event_processor,
     _dialog_request,
     _loaded_point_clouds,
 )
@@ -39,7 +38,6 @@ class M3C2TkinterPlugin(M3C2Plugin):
         ]
 
     def run(self) -> None:
-        process_events = _cloudcompare_event_processor()
         request = _dialog_request(self.app, _loaded_point_clouds(self.app))
         dialog = _M3C2TkinterDialog(request)
         last_request = request.to_payload()
@@ -60,7 +58,7 @@ class M3C2TkinterPlugin(M3C2Plugin):
 
                 dialog.process_events()
                 if dialog.is_open:
-                    process_events(0)  # QEventLoop::AllEvents
+                    pycc.ProcessEvents()
                     time.sleep(0.02)
             configuration = dialog.result
         finally:

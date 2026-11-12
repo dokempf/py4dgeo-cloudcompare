@@ -287,43 +287,6 @@ def _configuration_from_process(
     return M3C2Configuration.from_payload(response["configuration"])
 
 
-def _cloudcompare_event_processor() -> Any:
-    """Bind the event pump from CloudCompare's already-loaded Qt library.
-
-    Importing PySide6 in the host process can bind its extension module to an
-    ABI-incompatible Qt already loaded by CloudCompare.  Calling this public
-    static Qt function directly avoids loading any Python Qt binding.
-    """
-
-    symbol = (
-        "_ZN16QCoreApplication13processEventsE6QFlagsIN10QEventLoop"
-        "17ProcessEventsFlagEE"
-    )
-    libraries = [ctypes.CDLL(None)]
-    for library_name in (
-        "libQt6Core.so.6",
-        "libQt5Core.so.5",
-        "QtCore",
-    ):
-        try:
-            libraries.append(ctypes.CDLL(library_name))
-        except OSError:
-            continue
-
-    for library in libraries:
-        try:
-            process_events = getattr(library, symbol)
-        except AttributeError:
-            continue
-        process_events.argtypes = (ctypes.c_int,)
-        process_events.restype = None
-        return process_events
-    raise RuntimeError(
-        "Cannot access QCoreApplication::processEvents in CloudCompare's Qt "
-        "runtime."
-    )
-
-
 def _clear_cloudcompare_wait_cursor() -> None:
     """Remove the action launcher's busy cursor while its event loop is pumped."""
 
@@ -413,7 +376,6 @@ class M3C2Plugin(pycc.PythonPluginInterface):
         if self._dialog_process is not None:
             return
 
-        process_events = _cloudcompare_event_processor()
         request = _dialog_request(self.app, _loaded_point_clouds(self.app))
         self._dialog_process = _start_configuration_process(request)
         self._last_dialog_request = request.to_payload()
@@ -425,7 +387,7 @@ class M3C2Plugin(pycc.PythonPluginInterface):
         while self._dialog_process is not None:
             self._poll_dialog_process()
             if self._dialog_process is not None:
-                process_events(0)  # QEventLoop::AllEvents
+                pycc.ProcessEvents()
                 time.sleep(0.05)
 
     def _poll_dialog_process(self) -> None:
