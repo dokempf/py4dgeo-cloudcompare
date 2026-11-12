@@ -12,10 +12,10 @@ build-backend = "setuptools.build_meta"
 # single source of truth for py4dgeo_cloudcompare's version
 [project]
 name = "py4dgeo_cloudcompare"
-description = "Add short description here"
+description = "Run py4dgeo change analysis from CloudCompare"
 readme = "README.md"
 maintainers = [
-    { name = "Dominic Kempf", email = "your@email.com" },
+    { name = "Dominic Kempf", email = "dominic.kempf@iwr.uni-heidelberg.de" },
 ]
 version = "0.0.1"
 requires-python = ">=3.10"
@@ -26,7 +26,13 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    "numpy",
+    "py4dgeo>=1.2.1",
+    "PySide6",
 ]
+
+[project.entry-points."cloudcompare.plugins"]
+m3c2 = "py4dgeo_cloudcompare.m3c2:M3C2Plugin"
 
 [project.optional-dependencies]
 tests = [
