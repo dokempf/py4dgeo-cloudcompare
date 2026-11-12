@@ -1,6 +1,6 @@
 from importlib import metadata
 
-__version__ = metadata.version(__package__)
+__version__ = metadata.version("p4gcc")
 del metadata
 
 
