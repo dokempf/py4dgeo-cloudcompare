@@ -1,30 +1,32 @@
 """CloudCompare front end for :class:`py4dgeo.M3C2`.
 
-The imports of py4dgeo and PySide6 deliberately happen when the action is
-executed.  CloudCompare can therefore discover the plugin even while its
-Python environment is still being configured, and the numerical parts of
-this module can be tested without a Qt application.
+The PySide6 window lives in a spawned child process.  Only configuration
+values cross that boundary; all CloudCompare objects, coordinate arrays, and
+M3C2 processing stay on the CloudCompare action's calling thread.
 """
 
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
+import json
+from pathlib import Path
+import subprocess
+import sys
+import sysconfig
+import time
 from typing import Any, Sequence
 
 import numpy as np
 import pycc
 
-
-@dataclass(frozen=True)
-class M3C2Parameters:
-    """Parameters exposed by the M3C2 dialog, in py4dgeo units."""
-
-    normal_radii: tuple[float, ...] = (0.5, 1.0, 2.0)
-    cylinder_radius: float = 1.0
-    max_distance: float = 0.0
-    registration_error: float = 0.0
-    orientation_vector: tuple[float, float, float] = (0.0, 0.0, 1.0)
-    robust_aggregation: bool = False
+from .m3c2_protocol import (
+    CloudChoice,
+    DialogRequest,
+    M3C2Configuration,
+    M3C2Parameters,
+    parse_normal_radii,
+)
 
 
 @dataclass(frozen=True)
@@ -35,18 +37,6 @@ class M3C2Result:
     uncertainties: np.ndarray
     normals: np.ndarray
     normal_radii: np.ndarray
-
-
-def parse_normal_radii(value: str) -> tuple[float, ...]:
-    """Parse a comma/semicolon/whitespace separated list of positive radii."""
-
-    tokens = value.replace(";", " ").replace(",", " ").split()
-    if not tokens:
-        raise ValueError("Specify at least one normal radius.")
-    radii = tuple(float(token) for token in tokens)
-    if any(not np.isfinite(radius) or radius <= 0.0 for radius in radii):
-        raise ValueError("Normal radii must be finite and greater than zero.")
-    return radii
 
 
 def calculate_m3c2(
@@ -210,176 +200,201 @@ def create_result_cloud(
     return output
 
 
-class _M3C2Dialog:
-    """Small wrapper that keeps Qt imports local to GUI execution."""
+def _dialog_request(app: Any, clouds: Sequence[Any]) -> DialogRequest:
+    """Describe the configuration UI without exposing CloudCompare objects."""
 
-    def __init__(self, app: Any):
-        from PySide6 import QtCore, QtWidgets
-
-        self.QtWidgets = QtWidgets
-        self.app = app
-        self.clouds: list[Any] = []
-        self.dialog = QtWidgets.QDialog(QtWidgets.QApplication.activeWindow())
-        self.dialog.setWindowTitle("py4dgeo M3C2")
-        self.dialog.setMinimumWidth(480)
-        layout = QtWidgets.QVBoxLayout(self.dialog)
-        description = QtWidgets.QLabel(
-            "Compute signed M3C2 distances for selected CloudCompare point clouds."
+    choices = tuple(
+        CloudChoice(
+            unique_id=int(cloud.getUniqueID()),
+            label=f"{_cloud_name(cloud)}  [ID {cloud.getUniqueID()}]",
         )
-        description.setWordWrap(True)
-        layout.addWidget(description)
-        form = QtWidgets.QFormLayout()
-        layout.addLayout(form)
+        for cloud in clouds
+    )
+    if len(clouds) >= 2:
+        reference_index, compared_index = _preferred_cloud_indices(app, clouds)
+        reference_id = choices[reference_index].unique_id
+        compared_id = choices[compared_index].unique_id
+    elif len(clouds) == 1:
+        reference_id = choices[0].unique_id
+        compared_id = None
+    else:
+        reference_id = None
+        compared_id = None
+    return DialogRequest(
+        clouds=choices,
+        reference_cloud_id=reference_id,
+        compared_cloud_id=compared_id,
+        core_cloud_id=reference_id,
+    )
 
-        self.reference = QtWidgets.QComboBox()
-        self.compared = QtWidgets.QComboBox()
-        self.core = QtWidgets.QComboBox()
-        form.addRow("Reference cloud", self.reference)
-        form.addRow("Compared cloud", self.compared)
-        form.addRow("Core points", self.core)
-        self.cloud_status = QtWidgets.QLabel()
-        self.refresh_button = QtWidgets.QPushButton("Refresh point clouds")
-        self.refresh_button.clicked.connect(self.refresh_clouds)
-        cloud_controls = QtWidgets.QHBoxLayout()
-        cloud_controls.addWidget(self.cloud_status)
-        cloud_controls.addStretch()
-        cloud_controls.addWidget(self.refresh_button)
-        form.addRow("", cloud_controls)
 
-        self.normal_radii = QtWidgets.QLineEdit("0.5, 1.0, 2.0")
-        self.normal_radii.setToolTip("One or more py4dgeo search radii, separated by commas")
-        form.addRow("Normal radii", self.normal_radii)
-        self.cylinder_radius = self._spin(1.0, 1.0e-9)
-        form.addRow("Projection cylinder radius", self.cylinder_radius)
-        self.max_distance = self._spin(0.0, 0.0)
-        self.max_distance.setSpecialValueText("Automatic")
-        form.addRow("Maximum projection depth", self.max_distance)
-        self.registration_error = self._spin(0.0, 0.0)
-        form.addRow("Registration error", self.registration_error)
+def _start_configuration_process(request: DialogRequest) -> subprocess.Popen[str]:
+    """Start the child GUI without blocking CloudCompare's event loop."""
 
-        orientation = QtWidgets.QHBoxLayout()
-        self.orientation = []
-        for label, initial in zip("XYZ", (0.0, 0.0, 1.0)):
-            orientation.addWidget(QtWidgets.QLabel(label))
-            widget = self._spin(initial, -1.0e12)
-            widget.setMaximum(1.0e12)
-            self.orientation.append(widget)
-            orientation.addWidget(widget)
-        form.addRow("Normal orientation vector", orientation)
-        self.robust = QtWidgets.QCheckBox("Use median and IQR")
-        form.addRow("Robust aggregation", self.robust)
-        self.output_name = QtWidgets.QLineEdit("M3C2 result")
-        form.addRow("Output cloud name", self.output_name)
+    command = [str(_python_executable()), "-m", "py4dgeo_cloudcompare.m3c2_gui"]
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    _send_dialog_request(process, "configure", request)
+    return process
 
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok
-            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+
+def _send_dialog_request(
+    process: subprocess.Popen[str], message_type: str, request: DialogRequest
+) -> None:
+    """Send one configuration snapshot to the child GUI."""
+
+    if process.stdin is None:
+        raise RuntimeError("The M3C2 GUI process has no configuration input.")
+    process.stdin.write(
+        json.dumps({"type": message_type, "request": request.to_payload()}) + "\n"
+    )
+    process.stdin.flush()
+
+
+def _configuration_from_process(
+    returncode: int, stdout: str, stderr: str
+) -> M3C2Configuration | None:
+    """Validate and decode the child process's final response."""
+
+    if not stdout.strip():
+        detail = stderr.strip() or "no diagnostic output"
+        raise RuntimeError(
+            f"The M3C2 GUI process exited without responding (exit code "
+            f"{returncode}): {detail}"
         )
-        buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText("Compute")
-        buttons.accepted.connect(self._validate_and_accept)
-        buttons.rejected.connect(self.dialog.reject)
-        layout.addWidget(buttons)
-        self._align_center = QtCore.Qt.AlignmentFlag.AlignCenter
-        description.setAlignment(self._align_center)
+    try:
+        response = json.loads(stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("The M3C2 GUI process returned invalid JSON.") from error
 
-        # Keep the picker synchronized while the modeless dialog is open. This
-        # lets users load point clouds after launching the plugin.
-        self._refresh_timer = QtCore.QTimer(self.dialog)
-        self._refresh_timer.setInterval(1000)
-        self._refresh_timer.timeout.connect(self.refresh_clouds)
-        self._refresh_timer.start()
-        self.refresh_clouds(use_selection_defaults=True)
+    response_type = response.get("type")
+    if response_type == "cancelled":
+        return None
+    if response_type == "error":
+        error_type = response.get("error_type", "Error")
+        message = response.get("message", "Unknown error")
+        raise RuntimeError(f"M3C2 GUI {error_type}: {message}")
+    if response_type != "configured":
+        raise RuntimeError("The M3C2 GUI process returned an invalid response.")
+    if returncode != 0:
+        raise RuntimeError(f"The M3C2 GUI process exited with code {returncode}.")
+    return M3C2Configuration.from_payload(response["configuration"])
 
-    @staticmethod
-    def _cloud_label(cloud: Any) -> str:
-        return f"{_cloud_name(cloud)}  [ID {cloud.getUniqueID()}]"
 
-    @staticmethod
-    def _cloud_id(cloud: Any) -> Any:
-        return cloud.getUniqueID()
+def _cloudcompare_event_processor() -> Any:
+    """Bind the event pump from CloudCompare's already-loaded Qt library.
 
-    def refresh_clouds(self, use_selection_defaults: bool = False) -> None:
-        """Refresh the pickers while preserving the current assignments."""
+    Importing PySide6 in the host process can bind its extension module to an
+    ABI-incompatible Qt already loaded by CloudCompare.  Calling this public
+    static Qt function directly avoids loading any Python Qt binding.
+    """
 
-        combos = (self.reference, self.compared, self.core)
-        selected_ids = []
-        for combo in combos:
-            index = combo.currentIndex()
-            selected_ids.append(
-                self._cloud_id(self.clouds[index])
-                if 0 <= index < len(self.clouds)
-                else None
+    symbol = (
+        "_ZN16QCoreApplication13processEventsE6QFlagsIN10QEventLoop"
+        "17ProcessEventsFlagEE"
+    )
+    libraries = [ctypes.CDLL(None)]
+    for library_name in (
+        "libQt6Core.so.6",
+        "libQt5Core.so.5",
+        "QtCore",
+    ):
+        try:
+            libraries.append(ctypes.CDLL(library_name))
+        except OSError:
+            continue
+
+    for library in libraries:
+        try:
+            process_events = getattr(library, symbol)
+        except AttributeError:
+            continue
+        process_events.argtypes = (ctypes.c_int,)
+        process_events.restype = None
+        return process_events
+    raise RuntimeError(
+        "Cannot access QCoreApplication::processEvents in CloudCompare's Qt "
+        "runtime."
+    )
+
+
+def _clear_cloudcompare_wait_cursor() -> None:
+    """Remove the action launcher's busy cursor while its event loop is pumped."""
+
+    libraries = [ctypes.CDLL(None)]
+    for library_name in (
+        "libQt6Gui.so.6",
+        "libQt5Gui.so.5",
+        "QtGui",
+    ):
+        try:
+            libraries.append(ctypes.CDLL(library_name))
+        except OSError:
+            continue
+
+    for library in libraries:
+        try:
+            override_cursor = getattr(
+                library, "_ZN15QGuiApplication14overrideCursorEv"
             )
-
-        clouds = _loaded_point_clouds(self.app)
-        cloud_ids = [self._cloud_id(cloud) for cloud in clouds]
-        if cloud_ids == [self._cloud_id(cloud) for cloud in self.clouds]:
-            if len(clouds) == 0:
-                self.cloud_status.setText("No point clouds loaded")
-            return
-
-        self.clouds = clouds
-        labels = [self._cloud_label(cloud) for cloud in clouds]
-        if use_selection_defaults and len(clouds) >= 2:
-            reference_index, compared_index = _preferred_cloud_indices(self.app, clouds)
-            default_indices = (reference_index, compared_index, reference_index)
-        else:
-            default_indices = (0, 1, 0)
-
-        for combo, selected_id, default_index in zip(
-            combos, selected_ids, default_indices
-        ):
-            combo.clear()
-            combo.addItems(labels)
-            if selected_id in cloud_ids:
-                combo.setCurrentIndex(cloud_ids.index(selected_id))
-            elif default_index < len(clouds):
-                combo.setCurrentIndex(default_index)
-
-        if len(clouds) == 0:
-            self.cloud_status.setText("No point clouds loaded")
-        elif len(clouds) == 1:
-            self.cloud_status.setText("Load one more point cloud")
-        else:
-            self.cloud_status.setText(f"{len(clouds)} point clouds available")
-
-    def _spin(self, value: float, minimum: float):
-        widget = self.QtWidgets.QDoubleSpinBox()
-        widget.setDecimals(6)
-        widget.setRange(minimum, 1.0e12)
-        widget.setValue(value)
-        return widget
-
-    def _validate_and_accept(self) -> None:
-        self.refresh_clouds()
-        if len(self.clouds) < 2:
-            raise ValueError(
-                "Load at least two point clouds in CloudCompare before computing."
+            cursor_shape = getattr(library, "_ZNK7QCursor5shapeEv")
+            restore_cursor = getattr(
+                library, "_ZN15QGuiApplication21restoreOverrideCursorEv"
             )
-        parameters = self.parameters()
-        if np.linalg.norm(parameters.orientation_vector) == 0.0:
-            raise ValueError("The normal orientation vector must not be zero.")
-        if self.reference.currentIndex() == self.compared.currentIndex():
-            raise ValueError("Reference and compared clouds must be different.")
-        if not self.output_name.text().strip():
-            raise ValueError("Specify a name for the output cloud.")
-        self.dialog.accept()
+        except AttributeError:
+            continue
 
-    def show(self) -> None:
-        self.refresh_clouds()
-        self.dialog.show()
-        self.dialog.raise_()
-        self.dialog.activateWindow()
+        override_cursor.argtypes = ()
+        override_cursor.restype = ctypes.c_void_p
+        cursor_shape.argtypes = (ctypes.c_void_p,)
+        cursor_shape.restype = ctypes.c_int
+        restore_cursor.argtypes = ()
+        restore_cursor.restype = None
 
-    def parameters(self) -> M3C2Parameters:
-        return M3C2Parameters(
-            normal_radii=parse_normal_radii(self.normal_radii.text()),
-            cylinder_radius=self.cylinder_radius.value(),
-            max_distance=self.max_distance.value(),
-            registration_error=self.registration_error.value(),
-            orientation_vector=tuple(widget.value() for widget in self.orientation),
-            robust_aggregation=self.robust.isChecked(),
+        cursor = override_cursor()
+        # Qt::WaitCursor == 3 and Qt::BusyCursor == 16.  Do not disturb
+        # unrelated application override cursors.
+        if cursor and cursor_shape(cursor) in (3, 16):
+            restore_cursor()
+        return
+
+
+def _python_executable() -> Path:
+    """Find the standalone interpreter belonging to the embedded environment."""
+
+    executable = Path(sys.executable)
+    if executable.stem.lower().startswith("python") and executable.is_file():
+        return executable
+
+    executable_name = sysconfig.get_config_var("EXENAME")
+    candidates = []
+    if executable_name:
+        candidates.append(Path(sys.prefix) / "bin" / executable_name)
+        candidates.append(Path(sys.prefix) / executable_name)
+    candidates.extend(
+        (
+            Path(sys.prefix) / "bin" / "python3",
+            Path(sys.prefix) / "bin" / "python",
+            Path(sys.prefix) / "python.exe",
         )
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise RuntimeError(
+        f"Cannot find a standalone Python interpreter in {sys.prefix!r} for the "
+        "M3C2 GUI process."
+    )
+
+
+def _clouds_by_id(clouds: Sequence[Any]) -> dict[int, Any]:
+    return {int(cloud.getUniqueID()): cloud for cloud in clouds}
 
 
 class M3C2Plugin(pycc.PythonPluginInterface):
@@ -388,37 +403,81 @@ class M3C2Plugin(pycc.PythonPluginInterface):
     def __init__(self) -> None:
         super().__init__()
         self.app = pycc.GetInstance()
-        self._dialog: _M3C2Dialog | None = None
+        self._dialog_process: subprocess.Popen[str] | None = None
+        self._last_dialog_request: dict[str, Any] | None = None
 
     def getActions(self):
         return [pycc.Action(name="Compute M3C2 (py4dgeo)", target=self.run)]
 
     def run(self) -> None:
-        if self._dialog is None:
-            self._dialog = _M3C2Dialog(self.app)
-            self._dialog.dialog.accepted.connect(self._compute)
-        self._dialog.show()
+        if self._dialog_process is not None:
+            return
 
-    def _compute(self) -> None:
-        """Compute from the assignments captured by the modeless dialog."""
+        process_events = _cloudcompare_event_processor()
+        request = _dialog_request(self.app, _loaded_point_clouds(self.app))
+        self._dialog_process = _start_configuration_process(request)
+        self._last_dialog_request = request.to_payload()
+        _clear_cloudcompare_wait_cursor()
 
-        assert self._dialog is not None
-        dialog = self._dialog
-        clouds = dialog.clouds
-        reference = clouds[dialog.reference.currentIndex()]
-        compared = clouds[dialog.compared.currentIndex()]
-        core = clouds[dialog.core.currentIndex()]
+        # Keep this action on CloudCompare's thread while explicitly pumping
+        # its native event loop.  The application remains interactive, but no
+        # PySide6 module is imported into the host process.
+        while self._dialog_process is not None:
+            self._poll_dialog_process()
+            if self._dialog_process is not None:
+                process_events(0)  # QEventLoop::AllEvents
+                time.sleep(0.05)
+
+    def _poll_dialog_process(self) -> None:
+        """Refresh cloud metadata or consume the completed dialog response."""
+
+        process = self._dialog_process
+        if process is None:
+            return
+        returncode = process.poll()
+        if returncode is None:
+            request = _dialog_request(self.app, _loaded_point_clouds(self.app))
+            payload = request.to_payload()
+            if payload != self._last_dialog_request:
+                try:
+                    _send_dialog_request(process, "refresh", request)
+                except (BrokenPipeError, OSError):
+                    return
+                self._last_dialog_request = payload
+            return
+
+        stdout, stderr = process.communicate()
+        self._dialog_process = None
+        self._last_dialog_request = None
+
+        configuration = _configuration_from_process(returncode, stdout, stderr)
+        if configuration is not None:
+            self._compute(configuration)
+
+    def _compute(self, configuration: M3C2Configuration) -> None:
+        """Compute synchronously on the CloudCompare action's calling thread."""
+
+        configuration.validate()
+        clouds = _clouds_by_id(_loaded_point_clouds(self.app))
+        try:
+            reference = clouds[configuration.reference_cloud_id]
+            compared = clouds[configuration.compared_cloud_id]
+            core = clouds[configuration.core_cloud_id]
+        except KeyError as error:
+            raise RuntimeError(
+                f"Point cloud ID {error.args[0]} is no longer available."
+            ) from error
         result = calculate_m3c2(
             _global_points(reference),
             _global_points(compared),
             _global_points(core),
-            dialog.parameters(),
+            configuration.parameters,
         )
-        output = create_result_cloud(core, result, dialog.output_name.text().strip())
+        output = create_result_cloud(core, result, configuration.output_name)
         self.app.addToDB(output, updateZoom=False)
         self.app.redrawAll()
         print(
-            f"py4dgeo M3C2: added '{dialog.output_name.text().strip()}' "
+            f"py4dgeo M3C2: added '{configuration.output_name}' "
             f"with {output.size()} core points"
         )
 

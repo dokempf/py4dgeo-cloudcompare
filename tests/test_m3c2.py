@@ -1,6 +1,10 @@
 import importlib
+import json
+from pathlib import Path
 import sys
+import threading
 from types import ModuleType
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -158,74 +162,243 @@ def test_plugin_action(m3c2_module):
     assert actions[0].name == "Compute M3C2 (py4dgeo)"
 
 
-def test_plugin_opens_dialog_without_loaded_clouds(monkeypatch, m3c2_module):
-    shown = []
+def test_dialog_request_allows_no_loaded_clouds(m3c2_module):
+    app = SimpleNamespace(getSelectedEntities=lambda: [])
 
-    class Signal:
-        def connect(self, callback):
-            self.callback = callback
+    request = m3c2_module._dialog_request(app, [])
 
-    class Dialog:
-        def __init__(self, app):
-            self.app = app
-            self.dialog = type("Widget", (), {"accepted": Signal()})()
+    assert request.to_payload() == {
+        "clouds": [],
+        "reference_cloud_id": None,
+        "compared_cloud_id": None,
+        "core_cloud_id": None,
+    }
 
-        def show(self):
-            shown.append(True)
 
-    monkeypatch.setattr(m3c2_module, "_M3C2Dialog", Dialog)
+def test_dialog_request_allows_one_loaded_cloud(m3c2_module):
+    cloud = PointCloud()
+    cloud.getUniqueID = lambda: 10
+    cloud.getName = lambda: "only cloud"
+    app = SimpleNamespace(getSelectedEntities=lambda: [cloud])
+
+    request = m3c2_module._dialog_request(app, [cloud])
+
+    assert request.to_payload() == {
+        "clouds": [{"unique_id": 10, "label": "only cloud  [ID 10]"}],
+        "reference_cloud_id": 10,
+        "compared_cloud_id": None,
+        "core_cloud_id": 10,
+    }
+
+
+def test_dialog_request_contains_cloud_metadata_only(m3c2_module):
+    clouds = [PointCloud(), PointCloud()]
+    for identifier, cloud in enumerate(clouds, start=10):
+        cloud.getUniqueID = lambda identifier=identifier: identifier
+        cloud.getName = lambda identifier=identifier: f"cloud {identifier}"
+        cloud.points = lambda: pytest.fail("point data must not be read for the GUI")
+    app = SimpleNamespace(getSelectedEntities=lambda: clouds[::-1])
+
+    request = m3c2_module._dialog_request(app, clouds)
+    payload = request.to_payload()
+
+    assert payload == {
+        "clouds": [
+            {"unique_id": 10, "label": "cloud 10  [ID 10]"},
+            {"unique_id": 11, "label": "cloud 11  [ID 11]"},
+        ],
+        "reference_cloud_id": 10,
+        "compared_cloud_id": 11,
+        "core_cloud_id": 10,
+    }
+
+
+def test_configuration_round_trip_and_validation(m3c2_module):
+    configuration = m3c2_module.M3C2Configuration(
+        reference_cloud_id=10,
+        compared_cloud_id=11,
+        core_cloud_id=12,
+        parameters=m3c2_module.M3C2Parameters(
+            normal_radii=(1.0, 2.0), orientation_vector=(0.0, 1.0, 0.0)
+        ),
+        output_name="result",
+    )
+
+    restored = m3c2_module.M3C2Configuration.from_payload(
+        json.loads(json.dumps(configuration.to_payload()))
+    )
+    assert restored == configuration
+
+    invalid = configuration.to_payload()
+    invalid["compared_cloud_id"] = 10
+    with pytest.raises(ValueError, match="must be different"):
+        m3c2_module.M3C2Configuration.from_payload(invalid)
+
+
+def test_start_configuration_uses_json_subprocess(monkeypatch, m3c2_module):
+    request = m3c2_module.DialogRequest(
+        clouds=(
+            m3c2_module.CloudChoice(10, "one"),
+            m3c2_module.CloudChoice(11, "two"),
+        ),
+        reference_cloud_id=10,
+        compared_cloud_id=11,
+        core_cloud_id=10,
+    )
+    invocation = {}
+
+    class Input:
+        def __init__(self):
+            self.value = ""
+
+        def write(self, value):
+            self.value += value
+
+        def flush(self):
+            pass
+
+    process = SimpleNamespace(stdin=Input())
+
+    def popen(command, **kwargs):
+        invocation["command"] = command
+        invocation["kwargs"] = kwargs
+        return process
+
+    monkeypatch.setattr(m3c2_module, "_python_executable", lambda: Path("/python"))
+    monkeypatch.setattr(m3c2_module.subprocess, "Popen", popen)
+
+    assert m3c2_module._start_configuration_process(request) is process
+    assert invocation["command"] == [
+        "/python",
+        "-m",
+        "py4dgeo_cloudcompare.m3c2_gui",
+    ]
+    wire_request = json.loads(process.stdin.value)
+    assert wire_request == {"type": "configure", "request": request.to_payload()}
+    assert invocation["kwargs"]["stdin"] is m3c2_module.subprocess.PIPE
+
+
+def test_configuration_process_response_round_trip(m3c2_module):
+    configuration = m3c2_module.M3C2Configuration(
+        reference_cloud_id=10,
+        compared_cloud_id=11,
+        core_cloud_id=10,
+        parameters=m3c2_module.M3C2Parameters(),
+        output_name="result",
+    )
+    stdout = json.dumps(
+        {"type": "configured", "configuration": configuration.to_payload()}
+    )
+
+    assert m3c2_module._configuration_from_process(0, stdout, "") == configuration
+
+
+def test_plugin_computes_on_calling_thread(monkeypatch, m3c2_module):
+    caller_thread = threading.get_ident()
+    observed_threads = []
+    configuration = m3c2_module.M3C2Configuration(
+        reference_cloud_id=1,
+        compared_cloud_id=2,
+        core_cloud_id=1,
+        parameters=m3c2_module.M3C2Parameters(),
+        output_name="result",
+    )
     plugin = m3c2_module.M3C2Plugin()
+
+    def compute(received):
+        assert received == configuration
+        observed_threads.append(threading.get_ident())
+
+    response = json.dumps(
+        {"type": "configured", "configuration": configuration.to_payload()}
+    )
+    plugin._dialog_process = SimpleNamespace(
+        poll=lambda: 0,
+        communicate=lambda: (response, ""),
+    )
+    monkeypatch.setattr(plugin, "_compute", compute)
+
+    plugin._poll_dialog_process()
+
+    assert observed_threads == [caller_thread]
+
+
+def test_plugin_pumps_cloudcompare_events_without_pyside(
+    monkeypatch, m3c2_module
+):
+    caller_thread = threading.get_ident()
+    event_threads = []
+    poll_results = iter((None, 0))
+    process = SimpleNamespace(
+        poll=lambda: next(poll_results),
+        communicate=lambda: (json.dumps({"type": "cancelled"}), ""),
+        stdin=SimpleNamespace(write=lambda value: None, flush=lambda: None),
+    )
+    plugin = m3c2_module.M3C2Plugin()
+    monkeypatch.setattr(m3c2_module, "_loaded_point_clouds", lambda app: [])
+    monkeypatch.setattr(
+        m3c2_module, "_start_configuration_process", lambda request: process
+    )
+    monkeypatch.setattr(
+        m3c2_module,
+        "_cloudcompare_event_processor",
+        lambda: lambda flags: event_threads.append(threading.get_ident()),
+    )
+    monkeypatch.setattr(m3c2_module.time, "sleep", lambda seconds: None)
+
     plugin.run()
-    assert shown == [True]
+
+    assert event_threads == [caller_thread]
+    assert "PySide6" not in sys.modules
 
 
-def test_plugin_run_propagates_dialog_exception(monkeypatch, m3c2_module):
-    error = RuntimeError("dialog failed")
+def test_plugin_refreshes_cloud_metadata_while_dialog_is_open(
+    monkeypatch, m3c2_module
+):
+    class Input:
+        def __init__(self):
+            self.value = ""
 
-    class Dialog:
-        def __init__(self, app):
-            raise error
+        def write(self, value):
+            self.value += value
 
-    monkeypatch.setattr(m3c2_module, "_M3C2Dialog", Dialog)
+        def flush(self):
+            pass
+
+    request = m3c2_module.DialogRequest(
+        clouds=(
+            m3c2_module.CloudChoice(10, "one"),
+            m3c2_module.CloudChoice(11, "two"),
+        ),
+        reference_cloud_id=10,
+        compared_cloud_id=11,
+        core_cloud_id=10,
+    )
+    process_input = Input()
     plugin = m3c2_module.M3C2Plugin()
+    plugin._dialog_process = SimpleNamespace(
+        poll=lambda: None,
+        stdin=process_input,
+    )
+    plugin._last_dialog_request = {"clouds": []}
+    monkeypatch.setattr(m3c2_module, "_loaded_point_clouds", lambda app: [1, 2])
+    monkeypatch.setattr(m3c2_module, "_dialog_request", lambda app, clouds: request)
 
-    with pytest.raises(RuntimeError) as caught:
-        plugin.run()
+    plugin._poll_dialog_process()
 
-    assert caught.value is error
-
-
-def test_dialog_validation_propagates_exception(m3c2_module):
-    dialog = type(
-        "Dialog",
-        (),
-        {
-            "clouds": [],
-            "refresh_clouds": lambda self: None,
-        },
-    )()
-
-    with pytest.raises(ValueError, match="Load at least two point clouds"):
-        m3c2_module._M3C2Dialog._validate_and_accept(dialog)
+    assert json.loads(process_input.value) == {
+        "type": "refresh",
+        "request": request.to_payload(),
+    }
+    assert plugin._last_dialog_request == request.to_payload()
 
 
 def test_plugin_compute_propagates_raw_exception(monkeypatch, m3c2_module):
     error = RuntimeError("M3C2 failed")
-    cloud = object()
-    combo = type("Combo", (), {"currentIndex": lambda self: 0})()
-    output_name = type("Name", (), {"text": lambda self: "result"})()
-    dialog = type(
-        "Dialog",
-        (),
-        {
-            "clouds": [cloud],
-            "reference": combo,
-            "compared": combo,
-            "core": combo,
-            "output_name": output_name,
-            "parameters": lambda self: m3c2_module.M3C2Parameters(),
-        },
-    )()
+    clouds = [PointCloud(), PointCloud()]
+    clouds[0].getUniqueID = lambda: 10
+    clouds[1].getUniqueID = lambda: 11
+    monkeypatch.setattr(m3c2_module, "_loaded_point_clouds", lambda app: clouds)
     monkeypatch.setattr(m3c2_module, "_global_points", lambda cloud: np.empty((1, 3)))
 
     def fail(*args):
@@ -233,9 +406,15 @@ def test_plugin_compute_propagates_raw_exception(monkeypatch, m3c2_module):
 
     monkeypatch.setattr(m3c2_module, "calculate_m3c2", fail)
     plugin = m3c2_module.M3C2Plugin()
-    plugin._dialog = dialog
+    configuration = m3c2_module.M3C2Configuration(
+        reference_cloud_id=10,
+        compared_cloud_id=11,
+        core_cloud_id=10,
+        parameters=m3c2_module.M3C2Parameters(),
+        output_name="result",
+    )
 
     with pytest.raises(RuntimeError) as caught:
-        plugin._compute()
+        plugin._compute(configuration)
 
     assert caught.value is error

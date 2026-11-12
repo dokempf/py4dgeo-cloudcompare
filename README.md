@@ -42,12 +42,24 @@ python -m pip install .
 
 After restarting CloudCompare, run
 **Compute M3C2 (py4dgeo)** from the Python action launcher or the Python
-plugins menu. The modeless dialog can be opened before any point clouds are
-loaded. Its pickers update while clouds are loaded into CloudCompare and let
-you assign the reference, compared, and core point clouds. An existing
-selection is used only to choose convenient defaults. The dialog also
-configures normal radii, projection radius and depth,
-registration error, normal orientation, and robust aggregation.
+plugins menu. The configuration window starts even if fewer than two point
+clouds are loaded and reports the current availability; computation requires
+at least two. It runs in a separate PySide6 process and lets you assign the
+reference, compared, and core point clouds. An existing selection is used only
+to choose convenient defaults. The dialog also configures normal radii,
+projection radius and depth, registration error, normal orientation, and robust
+aggregation.
+
+CloudCompare remains responsive while the window is open because the plugin
+pumps CloudCompare's native Qt event loop while waiting for configuration. No
+PySide6 module is imported into the CloudCompare process. The window's cloud
+choices refresh as point clouds are added to or removed from the database.
+
+CloudCompare sends only cloud IDs, display labels, and default selections to
+the window. The window returns only the selected IDs and M3C2 parameters as
+JSON. Point-cloud objects and coordinate data never leave CloudCompare. After
+the window closes, the original CloudCompare action thread runs M3C2
+synchronously and adds the result to the database there.
 
 The result is added to CloudCompare as a new point cloud at the core-point
 locations. It displays the signed M3C2 distance and also contains scalar
