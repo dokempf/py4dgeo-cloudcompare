@@ -106,6 +106,7 @@ def test_selection_only_controls_cloud_defaults(m3c2_module):
 
 def test_calculate_m3c2_maps_parameters(monkeypatch, m3c2_module):
     py4dgeo = ModuleType("py4dgeo")
+    logfiles = []
 
     class Epoch:
         def __init__(self, points):
@@ -136,6 +137,7 @@ def test_calculate_m3c2_maps_parameters(monkeypatch, m3c2_module):
 
     py4dgeo.Epoch = Epoch
     py4dgeo.M3C2 = M3C2
+    py4dgeo.set_py4dgeo_logfile = logfiles.append
     monkeypatch.setitem(sys.modules, "py4dgeo", py4dgeo)
 
     points = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
@@ -156,6 +158,22 @@ def test_calculate_m3c2_maps_parameters(monkeypatch, m3c2_module):
     assert M3C2.last_kwargs["robust_aggr"] is True
     assert result.distances.tolist() == [0, 1]
     assert result.normal_radii.tolist() == [2.0, 2.0]
+    assert logfiles == [str(m3c2_module._PY4DGEO_LOG_PATH)]
+
+
+def test_error_report_contains_full_traceback(monkeypatch, tmp_path, m3c2_module):
+    report = tmp_path / "m3c2-error.log"
+    monkeypatch.setattr(m3c2_module, "_ERROR_REPORT_PATH", report)
+
+    try:
+        raise RuntimeError("complete diagnostic")
+    except RuntimeError:
+        written = m3c2_module._write_error_report()
+
+    assert written == report
+    contents = report.read_text(encoding="utf-8")
+    assert "Traceback (most recent call last)" in contents
+    assert "RuntimeError: complete diagnostic" in contents
 
 
 def test_plugin_action(m3c2_module):
@@ -329,7 +347,9 @@ def test_plugin_computes_on_calling_thread(monkeypatch, m3c2_module):
         poll=lambda: 0,
         stdin=io.StringIO(),
     )
-    finished_thread = SimpleNamespace(is_alive=lambda: False, join=lambda **kwargs: None)
+    finished_thread = SimpleNamespace(
+        is_alive=lambda: False, join=lambda **kwargs: None
+    )
     plugin._dialog_process = m3c2_module._ConfigurationProcess(
         process=process,
         responses=responses,
@@ -356,7 +376,9 @@ def test_plugin_pumps_cloudcompare_events_without_pyside(
         poll=lambda: next(poll_results),
         stdin=io.StringIO(),
     )
-    finished_thread = SimpleNamespace(is_alive=lambda: False, join=lambda **kwargs: None)
+    finished_thread = SimpleNamespace(
+        is_alive=lambda: False, join=lambda **kwargs: None
+    )
     session = m3c2_module._ConfigurationProcess(
         process=process,
         responses=responses,
@@ -453,7 +475,9 @@ def test_plugin_finishes_when_child_stays_alive_after_response(
         stdin=io.StringIO(),
         terminate=lambda: state.update(running=False, terminated=True),
     )
-    finished_thread = SimpleNamespace(is_alive=lambda: False, join=lambda **kwargs: None)
+    finished_thread = SimpleNamespace(
+        is_alive=lambda: False, join=lambda **kwargs: None
+    )
     plugin = m3c2_module.M3C2Plugin()
     plugin._dialog_process = m3c2_module._ConfigurationProcess(
         process=process,

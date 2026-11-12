@@ -9,13 +9,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import queue
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import threading
 import time
+import traceback
 from typing import Any, Sequence
 
 import numpy as np
@@ -27,6 +30,15 @@ from .m3c2_protocol import (
     M3C2Configuration,
     M3C2Parameters,
     parse_normal_radii,
+)
+
+
+_TEMPORARY_DIRECTORY = Path(tempfile.gettempdir())
+_PY4DGEO_LOG_PATH = (
+    _TEMPORARY_DIRECTORY / f"py4dgeo-cloudcompare-{os.getpid()}.log"
+)
+_ERROR_REPORT_PATH = (
+    _TEMPORARY_DIRECTORY / f"py4dgeo-cloudcompare-error-{os.getpid()}.log"
 )
 
 
@@ -62,7 +74,13 @@ def calculate_m3c2(
 ) -> M3C2Result:
     """Run py4dgeo M3C2 on three ``(n, 3)`` coordinate arrays."""
 
-    from py4dgeo import Epoch, M3C2
+    from py4dgeo import Epoch, M3C2, set_py4dgeo_logfile
+
+    # py4dgeo's default delayed FileHandler targets ``py4dgeo.log`` in the
+    # current working directory.  CloudCompare may run from a read-only
+    # installation directory (commonly on Windows), so the first log event
+    # would otherwise fail while trying to create that file.
+    set_py4dgeo_logfile(str(_PY4DGEO_LOG_PATH))
 
     reference = Epoch(_points_array(reference_points, "reference cloud"))
     compared = Epoch(_points_array(compared_points, "compared cloud"))
@@ -341,6 +359,16 @@ def _configuration_from_process(
     return M3C2Configuration.from_payload(response["configuration"])
 
 
+def _write_error_report() -> Path | None:
+    """Persist the current full traceback where it can be viewed without truncation."""
+
+    try:
+        _ERROR_REPORT_PATH.write_text(traceback.format_exc(), encoding="utf-8")
+    except OSError:
+        return None
+    return _ERROR_REPORT_PATH
+
+
 def _python_executable() -> Path:
     """Find the standalone interpreter belonging to the embedded environment."""
 
@@ -396,11 +424,17 @@ class M3C2Plugin(pycc.PythonPluginInterface):
         # Keep this action on CloudCompare's thread while explicitly pumping
         # its native event loop.  The application remains interactive, but no
         # PySide6 module is imported into the host process.
-        while self._dialog_process is not None:
-            self._poll_dialog_process()
-            if self._dialog_process is not None:
-                pycc.ProcessEvents()
-                time.sleep(0.05)
+        try:
+            while self._dialog_process is not None:
+                self._poll_dialog_process()
+                if self._dialog_process is not None:
+                    pycc.ProcessEvents()
+                    time.sleep(0.05)
+        except Exception:
+            report_path = _write_error_report()
+            if report_path is not None:
+                print(f"py4dgeo M3C2: full traceback written to '{report_path}'")
+            raise
 
     def _poll_dialog_process(self) -> None:
         """Refresh cloud metadata or consume the completed dialog response."""

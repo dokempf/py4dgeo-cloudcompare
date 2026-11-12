@@ -69,6 +69,11 @@ scales are respected when clouds use different local coordinate systems.
 CloudCompare discovers the plugin through the `cloudcompare.plugins` package
 entry point declared in `pyproject.toml`.
 
+py4dgeo's runtime log is written to the operating system's temporary directory
+instead of CloudCompare's potentially read-only working directory. If M3C2
+raises an exception, the plugin also writes the complete, untruncated traceback
+there and prints its path in CloudCompare's console.
+
 An additional **Compute M3C2 (py4dgeo, Tkinter)** action provides the same
 calculation through a standard-library Tkinter window. This variant constructs
 the window and runs M3C2 in the CloudCompare process; it does not spawn a child
