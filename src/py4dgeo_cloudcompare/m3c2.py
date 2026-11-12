@@ -265,6 +265,14 @@ def _start_configuration_process(request: DialogRequest) -> _ConfigurationProces
     """Start the child GUI without blocking CloudCompare's event loop."""
 
     command = [str(_python_executable()), "-m", "py4dgeo_cloudcompare.m3c2_gui"]
+    process_options: dict[str, Any] = {}
+    if sys.platform == "win32":
+        # The GUI child still uses python.exe because its standard pipes carry
+        # configuration messages.  Suppress only the otherwise empty console
+        # window attached to that executable.
+        process_options["creationflags"] = getattr(
+            subprocess, "CREATE_NO_WINDOW", 0x08000000
+        )
     process = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
@@ -272,6 +280,7 @@ def _start_configuration_process(request: DialogRequest) -> _ConfigurationProces
         stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
+        **process_options,
     )
     responses: queue.Queue[str] = queue.Queue()
     stderr_chunks: list[str] = []

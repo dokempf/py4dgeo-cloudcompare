@@ -307,6 +307,38 @@ def test_start_configuration_uses_json_subprocess(monkeypatch, m3c2_module):
     assert invocation["kwargs"]["stdin"] is m3c2_module.subprocess.PIPE
 
 
+def test_configuration_process_hides_windows_console(monkeypatch, m3c2_module):
+    request = m3c2_module.DialogRequest((), None, None, None)
+    invocation = {}
+
+    class Input(io.StringIO):
+        def flush(self):
+            pass
+
+    process = SimpleNamespace(
+        stdin=Input(),
+        stdout=io.StringIO(""),
+        stderr=io.StringIO(""),
+    )
+
+    def popen(command, **kwargs):
+        invocation.update(kwargs)
+        return process
+
+    monkeypatch.setattr(m3c2_module.sys, "platform", "win32")
+    monkeypatch.setattr(m3c2_module, "_python_executable", lambda: Path("python.exe"))
+    monkeypatch.setattr(m3c2_module.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        m3c2_module.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False
+    )
+
+    session = m3c2_module._start_configuration_process(request)
+    session.stdout_thread.join()
+    session.stderr_thread.join()
+
+    assert invocation["creationflags"] == 0x08000000
+
+
 def test_configuration_process_response_round_trip(m3c2_module):
     configuration = m3c2_module.M3C2Configuration(
         reference_cloud_id=10,
