@@ -69,6 +69,13 @@ scales are respected when clouds use different local coordinate systems.
 CloudCompare discovers the plugin through the `cloudcompare.plugins` package
 entry point declared in `pyproject.toml`.
 
+An additional **Compute M3C2 (py4dgeo, Tkinter)** action provides the same
+calculation through a standard-library Tkinter window. This variant constructs
+the window and runs M3C2 in the CloudCompare process; it does not spawn a child
+process. While the window is open, the action cooperatively services both the
+Tk and CloudCompare event queues and refreshes its list of loaded clouds. The
+original PySide6/subprocess plugin remains available unchanged.
+
 ## Acknowledgments
 
 This repository was set up using the [SSC Cookiecutter for Python Packages](https://github.com/ssciwr/cookiecutter-python-package).

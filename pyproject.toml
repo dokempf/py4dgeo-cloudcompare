@@ -33,6 +33,7 @@ dependencies = [
 [project.entry-points."cloudcompare.plugins"]
 hello = "py4dgeo_cloudcompare.plugin:HelloWorldPlugin"
 m3c2 = "py4dgeo_cloudcompare.m3c2:M3C2Plugin"
+m3c2_tkinter = "py4dgeo_cloudcompare.m3c2_tkinter:M3C2TkinterPlugin"
 qt_versions = "py4dgeo_cloudcompare.qt_versions:QtVersionsPlugin"
 
 [project.optional-dependencies]

@@ -418,3 +418,93 @@ def test_plugin_compute_propagates_raw_exception(monkeypatch, m3c2_module):
         plugin._compute(configuration)
 
     assert caught.value is error
+
+
+def test_tkinter_plugin_is_a_separate_action(monkeypatch, m3c2_module):
+    sys.modules.pop("py4dgeo_cloudcompare.m3c2_tkinter", None)
+    module = importlib.import_module("py4dgeo_cloudcompare.m3c2_tkinter")
+
+    plugin = module.M3C2TkinterPlugin()
+    actions = plugin.getActions()
+
+    assert len(actions) == 1
+    assert actions[0].name == "Compute M3C2 (py4dgeo, Tkinter)"
+
+
+def test_tkinter_plugin_runs_dialog_and_compute_in_process(
+    monkeypatch, m3c2_module
+):
+    sys.modules.pop("py4dgeo_cloudcompare.m3c2_tkinter", None)
+    module = importlib.import_module("py4dgeo_cloudcompare.m3c2_tkinter")
+    caller_thread = threading.get_ident()
+    request = m3c2_module.DialogRequest(
+        clouds=(
+            m3c2_module.CloudChoice(10, "one"),
+            m3c2_module.CloudChoice(11, "two"),
+        ),
+        reference_cloud_id=10,
+        compared_cloud_id=11,
+        core_cloud_id=10,
+    )
+    configuration = m3c2_module.M3C2Configuration(
+        reference_cloud_id=10,
+        compared_cloud_id=11,
+        core_cloud_id=10,
+        parameters=m3c2_module.M3C2Parameters(),
+        output_name="result",
+    )
+    observed_threads = []
+    dialogs = []
+
+    class Dialog:
+        def __init__(self, received):
+            assert received == request
+            self.is_open = True
+            self.result = None
+            self.event_count = 0
+            self.destroyed = False
+            dialogs.append(self)
+
+        def update_request(self, received):
+            pytest.fail(f"unexpected request refresh: {received}")
+
+        def process_events(self):
+            observed_threads.append(("tk", threading.get_ident()))
+            self.event_count += 1
+            if self.event_count == 2:
+                self.result = configuration
+                self.is_open = False
+
+        def destroy(self):
+            self.destroyed = True
+
+    plugin = module.M3C2TkinterPlugin()
+    monkeypatch.setattr(module, "_M3C2TkinterDialog", Dialog)
+    monkeypatch.setattr(module, "_loaded_point_clouds", lambda app: [])
+    monkeypatch.setattr(module, "_dialog_request", lambda app, clouds: request)
+    monkeypatch.setattr(
+        module,
+        "_cloudcompare_event_processor",
+        lambda: lambda flags: observed_threads.append(
+            ("qt", threading.get_ident())
+        ),
+    )
+    monkeypatch.setattr(module, "_clear_cloudcompare_wait_cursor", lambda: None)
+    monkeypatch.setattr(module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        plugin,
+        "_compute",
+        lambda received: observed_threads.append(
+            ("compute", threading.get_ident(), received)
+        ),
+    )
+
+    plugin.run()
+
+    assert observed_threads == [
+        ("tk", caller_thread),
+        ("qt", caller_thread),
+        ("tk", caller_thread),
+        ("compute", caller_thread, configuration),
+    ]
+    assert dialogs[0].destroyed is True
