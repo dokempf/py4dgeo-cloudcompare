@@ -7,7 +7,6 @@ M3C2 processing stay on the CloudCompare action's calling thread.
 
 from __future__ import annotations
 
-import ctypes
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -287,47 +286,6 @@ def _configuration_from_process(
     return M3C2Configuration.from_payload(response["configuration"])
 
 
-def _clear_cloudcompare_wait_cursor() -> None:
-    """Remove the action launcher's busy cursor while its event loop is pumped."""
-
-    libraries = [ctypes.CDLL(None)]
-    for library_name in (
-        "libQt6Gui.so.6",
-        "libQt5Gui.so.5",
-        "QtGui",
-    ):
-        try:
-            libraries.append(ctypes.CDLL(library_name))
-        except OSError:
-            continue
-
-    for library in libraries:
-        try:
-            override_cursor = getattr(
-                library, "_ZN15QGuiApplication14overrideCursorEv"
-            )
-            cursor_shape = getattr(library, "_ZNK7QCursor5shapeEv")
-            restore_cursor = getattr(
-                library, "_ZN15QGuiApplication21restoreOverrideCursorEv"
-            )
-        except AttributeError:
-            continue
-
-        override_cursor.argtypes = ()
-        override_cursor.restype = ctypes.c_void_p
-        cursor_shape.argtypes = (ctypes.c_void_p,)
-        cursor_shape.restype = ctypes.c_int
-        restore_cursor.argtypes = ()
-        restore_cursor.restype = None
-
-        cursor = override_cursor()
-        # Qt::WaitCursor == 3 and Qt::BusyCursor == 16.  Do not disturb
-        # unrelated application override cursors.
-        if cursor and cursor_shape(cursor) in (3, 16):
-            restore_cursor()
-        return
-
-
 def _python_executable() -> Path:
     """Find the standalone interpreter belonging to the embedded environment."""
 
@@ -379,7 +337,6 @@ class M3C2Plugin(pycc.PythonPluginInterface):
         request = _dialog_request(self.app, _loaded_point_clouds(self.app))
         self._dialog_process = _start_configuration_process(request)
         self._last_dialog_request = request.to_payload()
-        _clear_cloudcompare_wait_cursor()
 
         # Keep this action on CloudCompare's thread while explicitly pumping
         # its native event loop.  The application remains interactive, but no

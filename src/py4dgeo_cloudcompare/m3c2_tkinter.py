@@ -14,7 +14,6 @@ import pycc
 
 from .m3c2 import (
     M3C2Plugin,
-    _clear_cloudcompare_wait_cursor,
     _dialog_request,
     _loaded_point_clouds,
 )
@@ -41,7 +40,6 @@ class M3C2TkinterPlugin(M3C2Plugin):
         request = _dialog_request(self.app, _loaded_point_clouds(self.app))
         dialog = _M3C2TkinterDialog(request)
         last_request = request.to_payload()
-        _clear_cloudcompare_wait_cursor()
 
         try:
             # Both GUI toolkits run on the CloudCompare action thread.  A

@@ -488,7 +488,6 @@ def test_tkinter_plugin_runs_dialog_and_compute_in_process(
         "ProcessEvents",
         lambda: observed_threads.append(("qt", threading.get_ident())),
     )
-    monkeypatch.setattr(module, "_clear_cloudcompare_wait_cursor", lambda: None)
     monkeypatch.setattr(module.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(
         plugin,
