@@ -43,10 +43,7 @@ def parse_normal_radii(value: str) -> tuple[float, ...]:
     tokens = value.replace(";", " ").replace(",", " ").split()
     if not tokens:
         raise ValueError("Specify at least one normal radius.")
-    try:
-        radii = tuple(float(token) for token in tokens)
-    except ValueError as error:
-        raise ValueError("Normal radii must be numbers.") from error
+    radii = tuple(float(token) for token in tokens)
     if any(not np.isfinite(radius) or radius <= 0.0 for radius in radii):
         raise ValueError("Normal radii must be finite and greater than zero.")
     return radii
@@ -109,22 +106,16 @@ def _points_array(points: np.ndarray, description: str) -> np.ndarray:
 
 
 def _cloud_name(cloud: Any) -> str:
-    try:
-        return str(cloud.getName())
-    except (AttributeError, TypeError):
-        return "Point cloud"
+    return str(cloud.getName())
 
 
 def _global_points(cloud: Any) -> np.ndarray:
     """Return CloudCompare local points in their global coordinate system."""
 
     points = np.asarray(cloud.points(), dtype=np.float64).copy()
-    try:
-        shift_value = cloud.getGlobalShift()
-        shift = np.array([shift_value.x, shift_value.y, shift_value.z])
-        scale = float(cloud.getGlobalScale())
-    except (AttributeError, TypeError):
-        return points
+    shift_value = cloud.getGlobalShift()
+    shift = np.array([shift_value.x, shift_value.y, shift_value.z])
+    scale = float(cloud.getGlobalScale())
     if scale == 0.0:
         raise ValueError(f"Cloud '{_cloud_name(cloud)}' has a zero global scale.")
     # CloudCompare stores local = (global + shift) * scale.
@@ -144,32 +135,26 @@ def _loaded_point_clouds(app: Any) -> list[Any]:
         entity = pending.pop()
         if isinstance(entity, pycc.ccPointCloud):
             clouds.append(entity)
-        try:
-            pending.extend(
-                entity.getChild(index)
-                for index in reversed(range(entity.getChildrenNumber()))
-            )
-        except (AttributeError, TypeError):
-            continue
+        pending.extend(
+            entity.getChild(index)
+            for index in reversed(range(entity.getChildrenNumber()))
+        )
     return clouds
 
 
 def _preferred_cloud_indices(app: Any, clouds: Sequence[Any]) -> tuple[int, int]:
     """Use the current selection as defaults without requiring a selection."""
 
-    try:
-        selected_ids = {
-            entity.getUniqueID()
-            for entity in app.getSelectedEntities()
-            if isinstance(entity, pycc.ccPointCloud)
-        }
-        selected_indices = [
-            index
-            for index, cloud in enumerate(clouds)
-            if cloud.getUniqueID() in selected_ids
-        ]
-    except (AttributeError, TypeError):
-        selected_indices = []
+    selected_ids = {
+        entity.getUniqueID()
+        for entity in app.getSelectedEntities()
+        if isinstance(entity, pycc.ccPointCloud)
+    }
+    selected_indices = [
+        index
+        for index, cloud in enumerate(clouds)
+        if cloud.getUniqueID() in selected_ids
+    ]
     if len(selected_indices) >= 2:
         return selected_indices[0], selected_indices[1]
     if len(selected_indices) == 1:
@@ -193,12 +178,9 @@ def create_result_cloud(
     )
     output.setName(name)
 
-    try:
-        shift = core_cloud.getGlobalShift()
-        output.setGlobalShift(shift.x, shift.y, shift.z)
-        output.setGlobalScale(core_cloud.getGlobalScale())
-    except (AttributeError, TypeError):
-        pass
+    shift = core_cloud.getGlobalShift()
+    output.setGlobalShift(shift.x, shift.y, shift.z)
+    output.setGlobalScale(core_cloud.getGlobalScale())
 
     fields = (
         ("M3C2 distance", result.distances),
@@ -232,13 +214,7 @@ class _M3C2Dialog:
     """Small wrapper that keeps Qt imports local to GUI execution."""
 
     def __init__(self, app: Any):
-        try:
-            from PySide6 import QtCore, QtWidgets
-        except ImportError as error:
-            raise RuntimeError(
-                "PySide6 is required for the M3C2 parameter dialog. "
-                "Install PySide6 in CloudCompare's Python environment."
-            ) from error
+        from PySide6 import QtCore, QtWidgets
 
         self.QtWidgets = QtWidgets
         self.app = app
@@ -303,7 +279,6 @@ class _M3C2Dialog:
         buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.dialog.reject)
         layout.addWidget(buttons)
-        self._message_box = QtWidgets.QMessageBox
         self._align_center = QtCore.Qt.AlignmentFlag.AlignCenter
         description.setAlignment(self._align_center)
 
@@ -317,17 +292,11 @@ class _M3C2Dialog:
 
     @staticmethod
     def _cloud_label(cloud: Any) -> str:
-        try:
-            return f"{_cloud_name(cloud)}  [ID {cloud.getUniqueID()}]"
-        except (AttributeError, TypeError):
-            return _cloud_name(cloud)
+        return f"{_cloud_name(cloud)}  [ID {cloud.getUniqueID()}]"
 
     @staticmethod
     def _cloud_id(cloud: Any) -> Any:
-        try:
-            return cloud.getUniqueID()
-        except (AttributeError, TypeError):
-            return id(cloud)
+        return cloud.getUniqueID()
 
     def refresh_clouds(self, use_selection_defaults: bool = False) -> None:
         """Refresh the pickers while preserving the current assignments."""
@@ -382,22 +351,18 @@ class _M3C2Dialog:
         return widget
 
     def _validate_and_accept(self) -> None:
-        try:
-            self.refresh_clouds()
-            if len(self.clouds) < 2:
-                raise ValueError(
-                    "Load at least two point clouds in CloudCompare before computing."
-                )
-            parameters = self.parameters()
-            if np.linalg.norm(parameters.orientation_vector) == 0.0:
-                raise ValueError("The normal orientation vector must not be zero.")
-            if self.reference.currentIndex() == self.compared.currentIndex():
-                raise ValueError("Reference and compared clouds must be different.")
-            if not self.output_name.text().strip():
-                raise ValueError("Specify a name for the output cloud.")
-        except ValueError as error:
-            self._message_box.warning(self.dialog, "Invalid M3C2 parameters", str(error))
-            return
+        self.refresh_clouds()
+        if len(self.clouds) < 2:
+            raise ValueError(
+                "Load at least two point clouds in CloudCompare before computing."
+            )
+        parameters = self.parameters()
+        if np.linalg.norm(parameters.orientation_vector) == 0.0:
+            raise ValueError("The normal orientation vector must not be zero.")
+        if self.reference.currentIndex() == self.compared.currentIndex():
+            raise ValueError("Reference and compared clouds must be different.")
+        if not self.output_name.text().strip():
+            raise ValueError("Specify a name for the output cloud.")
         self.dialog.accept()
 
     def show(self) -> None:
@@ -429,49 +394,31 @@ class M3C2Plugin(pycc.PythonPluginInterface):
         return [pycc.Action(name="Compute M3C2 (py4dgeo)", target=self.run)]
 
     def run(self) -> None:
-        try:
-            if self._dialog is None:
-                self._dialog = _M3C2Dialog(self.app)
-                self._dialog.dialog.accepted.connect(self._compute)
-            self._dialog.show()
-        except Exception as error:  # CloudCompare actions must report, not crash the host.
-            self._show_error(str(error))
+        if self._dialog is None:
+            self._dialog = _M3C2Dialog(self.app)
+            self._dialog.dialog.accepted.connect(self._compute)
+        self._dialog.show()
 
     def _compute(self) -> None:
         """Compute from the assignments captured by the modeless dialog."""
 
         assert self._dialog is not None
         dialog = self._dialog
-        try:
-            clouds = dialog.clouds
-            reference = clouds[dialog.reference.currentIndex()]
-            compared = clouds[dialog.compared.currentIndex()]
-            core = clouds[dialog.core.currentIndex()]
-            result = calculate_m3c2(
-                _global_points(reference),
-                _global_points(compared),
-                _global_points(core),
-                dialog.parameters(),
-            )
-            output = create_result_cloud(core, result, dialog.output_name.text().strip())
-            self.app.addToDB(output, updateZoom=False)
-            self.app.redrawAll()
-            print(
-                f"py4dgeo M3C2: added '{dialog.output_name.text().strip()}' "
-                f"with {output.size()} core points"
-            )
-        except Exception as error:  # CloudCompare actions must report, not crash the host.
-            self._show_error(str(error))
-
-    @staticmethod
-    def _show_error(message: str) -> None:
-        print(f"py4dgeo M3C2 error: {message}")
-        try:
-            from PySide6.QtWidgets import QMessageBox
-
-            from PySide6.QtWidgets import QApplication
-
-            QMessageBox.critical(QApplication.activeWindow(), "py4dgeo M3C2", message)
-        except ImportError:
-            pass
+        clouds = dialog.clouds
+        reference = clouds[dialog.reference.currentIndex()]
+        compared = clouds[dialog.compared.currentIndex()]
+        core = clouds[dialog.core.currentIndex()]
+        result = calculate_m3c2(
+            _global_points(reference),
+            _global_points(compared),
+            _global_points(core),
+            dialog.parameters(),
+        )
+        output = create_result_cloud(core, result, dialog.output_name.text().strip())
+        self.app.addToDB(output, updateZoom=False)
+        self.app.redrawAll()
+        print(
+            f"py4dgeo M3C2: added '{dialog.output_name.text().strip()}' "
+            f"with {output.size()} core points"
+        )
 

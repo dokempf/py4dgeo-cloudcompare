@@ -177,3 +177,65 @@ def test_plugin_opens_dialog_without_loaded_clouds(monkeypatch, m3c2_module):
     plugin = m3c2_module.M3C2Plugin()
     plugin.run()
     assert shown == [True]
+
+
+def test_plugin_run_propagates_dialog_exception(monkeypatch, m3c2_module):
+    error = RuntimeError("dialog failed")
+
+    class Dialog:
+        def __init__(self, app):
+            raise error
+
+    monkeypatch.setattr(m3c2_module, "_M3C2Dialog", Dialog)
+    plugin = m3c2_module.M3C2Plugin()
+
+    with pytest.raises(RuntimeError) as caught:
+        plugin.run()
+
+    assert caught.value is error
+
+
+def test_dialog_validation_propagates_exception(m3c2_module):
+    dialog = type(
+        "Dialog",
+        (),
+        {
+            "clouds": [],
+            "refresh_clouds": lambda self: None,
+        },
+    )()
+
+    with pytest.raises(ValueError, match="Load at least two point clouds"):
+        m3c2_module._M3C2Dialog._validate_and_accept(dialog)
+
+
+def test_plugin_compute_propagates_raw_exception(monkeypatch, m3c2_module):
+    error = RuntimeError("M3C2 failed")
+    cloud = object()
+    combo = type("Combo", (), {"currentIndex": lambda self: 0})()
+    output_name = type("Name", (), {"text": lambda self: "result"})()
+    dialog = type(
+        "Dialog",
+        (),
+        {
+            "clouds": [cloud],
+            "reference": combo,
+            "compared": combo,
+            "core": combo,
+            "output_name": output_name,
+            "parameters": lambda self: m3c2_module.M3C2Parameters(),
+        },
+    )()
+    monkeypatch.setattr(m3c2_module, "_global_points", lambda cloud: np.empty((1, 3)))
+
+    def fail(*args):
+        raise error
+
+    monkeypatch.setattr(m3c2_module, "calculate_m3c2", fail)
+    plugin = m3c2_module.M3C2Plugin()
+    plugin._dialog = dialog
+
+    with pytest.raises(RuntimeError) as caught:
+        plugin._compute()
+
+    assert caught.value is error

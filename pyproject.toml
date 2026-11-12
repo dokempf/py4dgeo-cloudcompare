@@ -26,13 +26,13 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "numpy",
     "py4dgeo>=1.2.1",
-    "PySide6",
 ]
 
 [project.entry-points."cloudcompare.plugins"]
+hello = "py4dgeo_cloudcompare.plugin:HelloWorldPlugin"
 m3c2 = "py4dgeo_cloudcompare.m3c2:M3C2Plugin"
+qt_versions = "py4dgeo_cloudcompare.qt_versions:QtVersionsPlugin"
 
 [project.optional-dependencies]
 tests = [
