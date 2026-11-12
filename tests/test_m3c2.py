@@ -1,6 +1,8 @@
 import importlib
+import io
 import json
 from pathlib import Path
+import queue
 import sys
 import threading
 from types import ModuleType
@@ -258,7 +260,11 @@ def test_start_configuration_uses_json_subprocess(monkeypatch, m3c2_module):
         def flush(self):
             pass
 
-    process = SimpleNamespace(stdin=Input())
+    process = SimpleNamespace(
+        stdin=Input(),
+        stdout=io.StringIO(""),
+        stderr=io.StringIO(""),
+    )
 
     def popen(command, **kwargs):
         invocation["command"] = command
@@ -268,7 +274,11 @@ def test_start_configuration_uses_json_subprocess(monkeypatch, m3c2_module):
     monkeypatch.setattr(m3c2_module, "_python_executable", lambda: Path("/python"))
     monkeypatch.setattr(m3c2_module.subprocess, "Popen", popen)
 
-    assert m3c2_module._start_configuration_process(request) is process
+    session = m3c2_module._start_configuration_process(request)
+    session.stdout_thread.join()
+    session.stderr_thread.join()
+
+    assert session.process is process
     assert invocation["command"] == [
         "/python",
         "-m",
@@ -313,9 +323,19 @@ def test_plugin_computes_on_calling_thread(monkeypatch, m3c2_module):
     response = json.dumps(
         {"type": "configured", "configuration": configuration.to_payload()}
     )
-    plugin._dialog_process = SimpleNamespace(
+    responses = queue.Queue()
+    responses.put(response)
+    process = SimpleNamespace(
         poll=lambda: 0,
-        communicate=lambda: (response, ""),
+        stdin=io.StringIO(),
+    )
+    finished_thread = SimpleNamespace(is_alive=lambda: False, join=lambda **kwargs: None)
+    plugin._dialog_process = m3c2_module._ConfigurationProcess(
+        process=process,
+        responses=responses,
+        stdout_thread=finished_thread,
+        stderr_thread=finished_thread,
+        stderr_chunks=[],
     )
     monkeypatch.setattr(plugin, "_compute", compute)
 
@@ -330,15 +350,24 @@ def test_plugin_pumps_cloudcompare_events_without_pyside(
     caller_thread = threading.get_ident()
     event_threads = []
     poll_results = iter((None, 0))
+    responses = queue.Queue()
+    responses.put(json.dumps({"type": "cancelled"}))
     process = SimpleNamespace(
         poll=lambda: next(poll_results),
-        communicate=lambda: (json.dumps({"type": "cancelled"}), ""),
-        stdin=SimpleNamespace(write=lambda value: None, flush=lambda: None),
+        stdin=io.StringIO(),
+    )
+    finished_thread = SimpleNamespace(is_alive=lambda: False, join=lambda **kwargs: None)
+    session = m3c2_module._ConfigurationProcess(
+        process=process,
+        responses=responses,
+        stdout_thread=finished_thread,
+        stderr_thread=finished_thread,
+        stderr_chunks=[],
     )
     plugin = m3c2_module.M3C2Plugin()
     monkeypatch.setattr(m3c2_module, "_loaded_point_clouds", lambda app: [])
     monkeypatch.setattr(
-        m3c2_module, "_start_configuration_process", lambda request: process
+        m3c2_module, "_start_configuration_process", lambda request: session
     )
     monkeypatch.setattr(
         m3c2_module.pycc,
@@ -377,9 +406,17 @@ def test_plugin_refreshes_cloud_metadata_while_dialog_is_open(
     )
     process_input = Input()
     plugin = m3c2_module.M3C2Plugin()
-    plugin._dialog_process = SimpleNamespace(
+    process = SimpleNamespace(
         poll=lambda: None,
         stdin=process_input,
+    )
+    active_thread = SimpleNamespace(is_alive=lambda: True, join=lambda **kwargs: None)
+    plugin._dialog_process = m3c2_module._ConfigurationProcess(
+        process=process,
+        responses=queue.Queue(),
+        stdout_thread=active_thread,
+        stderr_thread=active_thread,
+        stderr_chunks=[],
     )
     plugin._last_dialog_request = {"clouds": []}
     monkeypatch.setattr(m3c2_module, "_loaded_point_clouds", lambda app: [1, 2])
@@ -392,6 +429,49 @@ def test_plugin_refreshes_cloud_metadata_while_dialog_is_open(
         "request": request.to_payload(),
     }
     assert plugin._last_dialog_request == request.to_payload()
+
+
+def test_plugin_finishes_when_child_stays_alive_after_response(
+    monkeypatch, m3c2_module
+):
+    configuration = m3c2_module.M3C2Configuration(
+        reference_cloud_id=10,
+        compared_cloud_id=11,
+        core_cloud_id=10,
+        parameters=m3c2_module.M3C2Parameters(),
+        output_name="result",
+    )
+    responses = queue.Queue()
+    responses.put(
+        json.dumps(
+            {"type": "configured", "configuration": configuration.to_payload()}
+        )
+    )
+    state = {"running": True, "terminated": False}
+    process = SimpleNamespace(
+        poll=lambda: None if state["running"] else -15,
+        stdin=io.StringIO(),
+        terminate=lambda: state.update(running=False, terminated=True),
+    )
+    finished_thread = SimpleNamespace(is_alive=lambda: False, join=lambda **kwargs: None)
+    plugin = m3c2_module.M3C2Plugin()
+    plugin._dialog_process = m3c2_module._ConfigurationProcess(
+        process=process,
+        responses=responses,
+        stdout_thread=finished_thread,
+        stderr_thread=finished_thread,
+        stderr_chunks=[],
+    )
+    computed = []
+    clock = iter((0.0, 2.0))
+    monkeypatch.setattr(m3c2_module.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(plugin, "_compute", computed.append)
+
+    plugin._poll_dialog_process()
+    plugin._poll_dialog_process()
+
+    assert state["terminated"] is True
+    assert computed == [configuration]
 
 
 def test_plugin_compute_propagates_raw_exception(monkeypatch, m3c2_module):

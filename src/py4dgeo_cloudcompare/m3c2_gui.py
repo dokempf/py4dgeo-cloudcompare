@@ -43,6 +43,7 @@ def main() -> None:
             "message": str(error),
         }
     json.dump(response, sys.stdout)
+    sys.stdout.write("\n")
     sys.stdout.flush()
 
 

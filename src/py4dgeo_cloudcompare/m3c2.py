@@ -10,9 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import queue
 import subprocess
 import sys
 import sysconfig
+import threading
 import time
 from typing import Any, Sequence
 
@@ -36,6 +38,20 @@ class M3C2Result:
     uncertainties: np.ndarray
     normals: np.ndarray
     normal_radii: np.ndarray
+
+
+@dataclass
+class _ConfigurationProcess:
+    """Child process plus asynchronously drained configuration channels."""
+
+    process: subprocess.Popen[str]
+    responses: queue.Queue[str]
+    stdout_thread: threading.Thread
+    stderr_thread: threading.Thread
+    stderr_chunks: list[str]
+    response: str | None = None
+    response_received_at: float | None = None
+    terminated_after_response: bool = False
 
 
 def calculate_m3c2(
@@ -227,7 +243,7 @@ def _dialog_request(app: Any, clouds: Sequence[Any]) -> DialogRequest:
     )
 
 
-def _start_configuration_process(request: DialogRequest) -> subprocess.Popen[str]:
+def _start_configuration_process(request: DialogRequest) -> _ConfigurationProcess:
     """Start the child GUI without blocking CloudCompare's event loop."""
 
     command = [str(_python_executable()), "-m", "py4dgeo_cloudcompare.m3c2_gui"]
@@ -239,8 +255,43 @@ def _start_configuration_process(request: DialogRequest) -> subprocess.Popen[str
         text=True,
         encoding="utf-8",
     )
+    responses: queue.Queue[str] = queue.Queue()
+    stderr_chunks: list[str] = []
+
+    def read_response() -> None:
+        assert process.stdout is not None
+        try:
+            responses.put(process.stdout.readline())
+        except (OSError, ValueError):
+            responses.put("")
+
+    def drain_stderr() -> None:
+        assert process.stderr is not None
+        try:
+            stderr_chunks.append(process.stderr.read())
+        except (OSError, ValueError):
+            pass
+
+    stdout_thread = threading.Thread(
+        target=read_response,
+        name="py4dgeo-m3c2-response-reader",
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=drain_stderr,
+        name="py4dgeo-m3c2-stderr-reader",
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
     _send_dialog_request(process, "configure", request)
-    return process
+    return _ConfigurationProcess(
+        process=process,
+        responses=responses,
+        stdout_thread=stdout_thread,
+        stderr_thread=stderr_thread,
+        stderr_chunks=stderr_chunks,
+    )
 
 
 def _send_dialog_request(
@@ -257,7 +308,11 @@ def _send_dialog_request(
 
 
 def _configuration_from_process(
-    returncode: int, stdout: str, stderr: str
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    *,
+    allow_nonzero: bool = False,
 ) -> M3C2Configuration | None:
     """Validate and decode the child process's final response."""
 
@@ -281,7 +336,7 @@ def _configuration_from_process(
         raise RuntimeError(f"M3C2 GUI {error_type}: {message}")
     if response_type != "configured":
         raise RuntimeError("The M3C2 GUI process returned an invalid response.")
-    if returncode != 0:
+    if returncode != 0 and not allow_nonzero:
         raise RuntimeError(f"The M3C2 GUI process exited with code {returncode}.")
     return M3C2Configuration.from_payload(response["configuration"])
 
@@ -324,7 +379,7 @@ class M3C2Plugin(pycc.PythonPluginInterface):
     def __init__(self) -> None:
         super().__init__()
         self.app = pycc.GetInstance()
-        self._dialog_process: subprocess.Popen[str] | None = None
+        self._dialog_process: _ConfigurationProcess | None = None
         self._last_dialog_request: dict[str, Any] | None = None
 
     def getActions(self):
@@ -350,10 +405,39 @@ class M3C2Plugin(pycc.PythonPluginInterface):
     def _poll_dialog_process(self) -> None:
         """Refresh cloud metadata or consume the completed dialog response."""
 
-        process = self._dialog_process
-        if process is None:
+        session = self._dialog_process
+        if session is None:
             return
+        process = session.process
+
+        if session.response is None:
+            try:
+                session.response = session.responses.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                session.response_received_at = time.monotonic()
+                if process.stdin is not None:
+                    try:
+                        process.stdin.close()
+                    except (BrokenPipeError, OSError):
+                        pass
+                    process.stdin = None
+
         returncode = process.poll()
+        if session.response is not None and returncode is None:
+            assert session.response_received_at is not None
+            if time.monotonic() - session.response_received_at >= 1.0:
+                # The result has been flushed already.  A blocked stdin reader
+                # must not keep CloudCompare's action alive indefinitely.
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+                else:
+                    session.terminated_after_response = True
+            return
+
         if returncode is None:
             request = _dialog_request(self.app, _loaded_point_clouds(self.app))
             payload = request.to_payload()
@@ -365,11 +449,28 @@ class M3C2Plugin(pycc.PythonPluginInterface):
                 self._last_dialog_request = payload
             return
 
-        stdout, stderr = process.communicate()
+        if session.response is None:
+            # The process may have exited just before the reader enqueued its
+            # final line.  Let that reader finish without blocking the UI.
+            if session.stdout_thread.is_alive():
+                return
+            try:
+                session.response = session.responses.get_nowait()
+            except queue.Empty:
+                session.response = ""
+
+        session.stdout_thread.join(timeout=0.1)
+        session.stderr_thread.join(timeout=0.1)
+        stderr = "".join(session.stderr_chunks)
         self._dialog_process = None
         self._last_dialog_request = None
 
-        configuration = _configuration_from_process(returncode, stdout, stderr)
+        configuration = _configuration_from_process(
+            returncode,
+            session.response,
+            stderr,
+            allow_nonzero=session.terminated_after_response,
+        )
         if configuration is not None:
             self._compute(configuration)
 

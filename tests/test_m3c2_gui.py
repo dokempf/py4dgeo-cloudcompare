@@ -38,3 +38,4 @@ def test_gui_protocol_returns_configuration_json(monkeypatch):
         "type": "configured",
         "configuration": json.loads(json.dumps(configuration.to_payload())),
     }
+    assert standard_output.getvalue().endswith("\n")
