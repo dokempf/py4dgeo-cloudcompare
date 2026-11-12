@@ -11,7 +11,7 @@ build-backend = "setuptools.build_meta"
 # a variety of build tools. Notably, the version specified here is the
 # single source of truth for py4dgeo_cloudcompare's version
 [project]
-name = "py4dgeo_cloudcompare"
+name = "p4gcc"
 description = "Run py4dgeo change analysis from CloudCompare"
 readme = "README.md"
 maintainers = [
