@@ -41,25 +41,17 @@ python -m pip install .
 ```
 
 After restarting CloudCompare, run
-**Compute M3C2 (py4dgeo)** from the Python action launcher or the Python
+**Compute M3C2 (py4dgeo, Tkinter)** from the Python action launcher or the Python
 plugins menu. The configuration window starts even if fewer than two point
 clouds are loaded and reports the current availability; computation requires
-at least two. It runs in a separate PySide6 process and lets you assign the
-reference, compared, and core point clouds. An existing selection is used only
-to choose convenient defaults. The dialog also configures normal radii,
-projection radius and depth, registration error, normal orientation, and robust
-aggregation.
+at least two. It lets you assign the reference, compared, and core point
+clouds. An existing selection is used only to choose convenient defaults. The
+dialog also configures normal radii, projection radius and depth, registration
+error, normal orientation, and robust aggregation.
 
-CloudCompare remains responsive while the window is open because the plugin
-pumps CloudCompare's native Qt event loop while waiting for configuration. No
-PySide6 module is imported into the CloudCompare process. The window's cloud
-choices refresh as point clouds are added to or removed from the database.
-
-CloudCompare sends only cloud IDs, display labels, and default selections to
-the window. The window returns only the selected IDs and M3C2 parameters as
-JSON. Point-cloud objects and coordinate data never leave CloudCompare. After
-the window closes, the original CloudCompare action thread runs M3C2
-synchronously and adds the result to the database there.
+The Tkinter window and M3C2 calculation run in the CloudCompare process. While
+the window is open, the action cooperatively services both the Tk and
+CloudCompare event queues and refreshes its list of loaded clouds.
 
 The result is added to CloudCompare as a new point cloud at the core-point
 locations. It displays the signed M3C2 distance and also contains scalar
@@ -73,13 +65,6 @@ py4dgeo's runtime log is written to the operating system's temporary directory
 instead of CloudCompare's potentially read-only working directory. If M3C2
 raises an exception, the plugin also writes the complete, untruncated traceback
 there and prints its path in CloudCompare's console.
-
-An additional **Compute M3C2 (py4dgeo, Tkinter)** action provides the same
-calculation through a standard-library Tkinter window. This variant constructs
-the window and runs M3C2 in the CloudCompare process; it does not spawn a child
-process. While the window is open, the action cooperatively services both the
-Tk and CloudCompare event queues and refreshes its list of loaded clouds. The
-original PySide6/subprocess plugin remains available unchanged.
 
 ## Acknowledgments
 
