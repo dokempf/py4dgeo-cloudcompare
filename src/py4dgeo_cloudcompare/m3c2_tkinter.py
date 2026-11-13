@@ -18,7 +18,6 @@ from .m3c2_configuration import (
     DialogRequest,
     M3C2Configuration,
     M3C2Parameters,
-    parse_normal_radii,
 )
 
 
@@ -366,6 +365,8 @@ class _M3C2TkinterDialog:
         import tkinter as tk
         from tkinter import messagebox, ttk
 
+        from .tkinter_widgets import FloatList
+
         self.tk = tk
         self.ttk = ttk
         self.messagebox = messagebox
@@ -399,10 +400,6 @@ class _M3C2TkinterDialog:
         )
 
         defaults = M3C2Parameters()
-        self.normal_radii = tk.StringVar(
-            self.root,
-            value=", ".join(str(radius) for radius in defaults.normal_radii),
-        )
         self.cylinder_radius = tk.StringVar(
             self.root, value=str(defaults.cylinder_radius)
         )
@@ -422,7 +419,17 @@ class _M3C2TkinterDialog:
         self.output_name = tk.StringVar(self.root, value="M3C2 result")
 
         row = 5
-        self._add_entry(frame, row, "Normal radii", self.normal_radii)
+        ttk.Label(frame, text="Normal radii").grid(
+            row=row, column=0, sticky="nw", padx=(0, 8), pady=3
+        )
+        self.normal_radii = FloatList(
+            frame,
+            defaults.normal_radii,
+            validator=self._validate_normal_radius,
+            on_invalid=self._show_invalid_normal_radius,
+            spinbox_from=0.0,
+        )
+        self.normal_radii.grid(row=row, column=1, sticky="ew", pady=3)
         row += 1
         self._add_entry(
             frame, row, "Projection cylinder radius", self.cylinder_radius
@@ -494,6 +501,18 @@ class _M3C2TkinterDialog:
                 coordinates, textvariable=variable, width=10
             ).grid(row=0, column=column * 2 + 1, sticky="ew")
 
+    @staticmethod
+    def _validate_normal_radius(value: float) -> None:
+        if value <= 0.0:
+            raise ValueError("A normal radius must be greater than zero.")
+
+    def _show_invalid_normal_radius(self, _error: ValueError) -> None:
+        self.messagebox.showwarning(
+            "Invalid normal radius",
+            "Enter a finite normal radius greater than zero.",
+            parent=self.root,
+        )
+
     def update_request(
         self, request: DialogRequest, preserve_selection: bool = True
     ) -> None:
@@ -543,7 +562,7 @@ class _M3C2TkinterDialog:
             compared_cloud_id=compared_id,
             core_cloud_id=core_id,
             parameters=M3C2Parameters(
-                normal_radii=parse_normal_radii(self.normal_radii.get()),
+                normal_radii=self.normal_radii.get(),
                 cylinder_radius=float(self.cylinder_radius.get()),
                 max_distance=float(self.max_distance.get()),
                 registration_error=float(self.registration_error.get()),

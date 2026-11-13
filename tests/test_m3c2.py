@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from py4dgeo_cloudcompare.m3c2_configuration import parse_normal_radii
+
 
 class PythonPluginInterface:
     pass
@@ -38,12 +40,12 @@ def m3c2_module(monkeypatch):
     return importlib.import_module("py4dgeo_cloudcompare.m3c2_tkinter")
 
 
-def test_parse_normal_radii(m3c2_module):
-    assert m3c2_module.parse_normal_radii("0.5, 1; 2") == (0.5, 1.0, 2.0)
+def test_parse_normal_radii():
+    assert parse_normal_radii("0.5, 1; 2") == (0.5, 1.0, 2.0)
 
     for invalid in ("", "one", "0", "-1", "nan"):
         with pytest.raises(ValueError):
-            m3c2_module.parse_normal_radii(invalid)
+            parse_normal_radii(invalid)
 
 
 def test_global_points_applies_cloudcompare_shift_and_scale(m3c2_module):
